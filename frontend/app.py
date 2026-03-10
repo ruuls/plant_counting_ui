@@ -11,7 +11,6 @@ import streamlit as st
 
 st.set_page_config(page_title="Weed Detection & Geolocation", layout="wide")
 
-# ---------- global UI font settings ----------
 BASE_FONT = int(os.getenv("BASE_FONT_PT", "18"))
 SHOW_DEBUG = bool(int(os.getenv("UI_DEBUG", "0")))
 RIGHT_PAD_PX = int(os.getenv("RIGHT_PAD_PX", "220"))
