@@ -215,36 +215,45 @@ def decode_thumb_b64_to_np(b64_str: str) -> np.ndarray:
     return np.asarray(img, dtype=np.uint8)
 
 # ---------- UI ----------
-st.markdown("""
-### 📍 Weed Detection and Geolocation App
-Upload a georeferenced **orthomosaic TIFF**, detect **weeds** via YOLO, and download a **shapefile** of GPS detections.
+st.title("Plant Counting UI")
+st.caption("Upload orthomosaic TIFF and run plant detection.")
 
-**Key Features**
-- Upload large `.tif` orthomosaics
-- Tile-wise YOLO inference
-- GPS (WGS84) conversion of detections
-- Downloadable **.shp** (all weeds or per weed)
-- Interactive maps, heatmaps, KPIs, histograms
-
-Code and demo: https://github.com/rutvij-25/weedgeolocator
-""")
-
-uploaded = st.file_uploader("Upload Orthomosaic GeoTIFF", type=["tif", "tiff"])
+uploaded = st.file_uploader("Upload orthomosaic (GeoTIFF)", type=["tif", "tiff"])
+run = st.button("Run Detection", type="primary")
 if uploaded is None:
     st.info("Upload a georeferenced TIFF to begin.")
     st.stop()
-
-# Read once → bytes (enables hashing + cache)
 safe_name = sanitize_filename(getattr(uploaded, "name", None))
-file_bytes = uploaded.getbuffer().tobytes()  # avoids extra copies vs .read()
+file_bytes = uploaded.getbuffer().tobytes()
+file_sha = sha1_bytes(file_bytes)
+st.session_state.setdefault("infer_data", None)
+st.session_state.setdefault("infer_sha", None)
+st.session_state.setdefault("infer_name", None)
 
-with st.spinner("Processing…"):
-    try:
-        data = infer_cached(file_bytes, safe_name, API_BASE)
-    except Exception as e:
-        st.error(str(e))
-        if SHOW_DEBUG: st.exception(e)
-        st.stop()
+if run:
+    with st.spinner("Running inference..."):
+        try:
+            data = infer_cached(file_bytes, safe_name, API_BASE)
+            st.session_state.infer_data = data
+            st.session_state.infer_sha = file_sha
+            st.session_state.infer_name = safe_name
+        except Exception as e:
+            st.error(str(e))
+            if SHOW_DEBUG:
+                st.exception(e)
+            st.stop()
+
+# Keep last inference result while interacting with sliders/selectors.
+if st.session_state.infer_data is None:
+    st.info("Click **Run Detection** after uploading the TIFF.")
+    st.stop()
+
+# If user uploads a different file, ask for re-run explicitly.
+if st.session_state.infer_sha != file_sha:
+    st.warning("New file selected. Click **Run Detection** to refresh results.")
+    st.stop()
+
+data = st.session_state.infer_data
 
 # ---------- Decode payload (cached) ----------
 thumb_np = decode_thumb_b64_to_np(data["thumb_png_b64"])
@@ -298,6 +307,108 @@ def _to_display_name(s: str) -> str:
         return re.sub(r"\s+", " ", re.sub(r"_+", " ", str(s))).strip().title()
 
 display_names = [_to_display_name(n) for n in class_names]
+
+# ---------- Simple top summary ----------
+st.success("Detection complete.")
+top_a, top_b, top_c = st.columns(3)
+with top_a:
+    st.metric("Total detections", int(data.get("total_weeds", 0)))
+with top_b:
+    st.metric("Field area (m²)", f"{float(data.get('field_area_m2', 0.0)):,.0f}")
+with top_c:
+    st.metric("Avg density (per m²)", f"{float(data.get('avg_density', 0.0)):.4f}")
+
+with st.expander("Run details"):
+    st.write(f"**API:** `{API_BASE}`")
+    st.write(f"**Model path:** `{os.getenv('MODEL_PATH', '(set in backend terminal)')}`")
+    st.write(f"**Classes from model:** {', '.join(display_names) if display_names else 'N/A'}")
+    st.write(f"**Base grid cell:** `{int(cell_m)} m`")
+
+if NUM_CLASSES:
+    st.subheader("Per-class counts")
+    counts_tbl = {
+        "Class": [display_names[i] for i in range(NUM_CLASSES)],
+        "Count": [int(totals_by_class[i]) for i in range(NUM_CLASSES)],
+    }
+    st.dataframe(counts_tbl, use_container_width=True, hide_index=True)
+
+# ---------- Minimal points overlay ----------
+st.subheader("Orthomosaic + Detections")
+fig_points = px.imshow(thumb_np)
+fig_points.update_xaxes(range=[0, disp_w], showgrid=False, visible=False)
+fig_points.update_yaxes(range=[disp_h, 0], showgrid=False, visible=False)
+fig_points.update_yaxes(scaleanchor="x", scaleratio=1)
+fig_points.update_layout(margin=dict(l=0, r=0, t=0, b=0), dragmode=False, height=850)
+
+palette = ["#ff3b30", "#34c759", "#007aff", "#af52de", "#ff9f0a", "#ff2d55"]
+for ci in range(NUM_CLASSES):
+    if ci >= len(pix_x_by_class) or not pix_x_by_class[ci]:
+        continue
+    sx = np.asarray(pix_x_by_class[ci], dtype=np.float64) * scale_x
+    sy = np.asarray(pix_y_by_class[ci], dtype=np.float64) * scale_y
+    in_bounds = (sx >= 0) & (sx <= disp_w) & (sy >= 0) & (sy <= disp_h)
+    if not np.any(in_bounds):
+        continue
+    fig_points.add_trace(
+        go.Scattergl(
+            x=sx[in_bounds],
+            y=sy[in_bounds],
+            mode="markers",
+            name=display_names[ci] if ci < len(display_names) else f"class_{ci}",
+            marker=dict(size=8, color=palette[ci % len(palette)], opacity=0.95, line=dict(width=1, color="white")),
+            hoverinfo="skip",
+            showlegend=True,
+        )
+    )
+fig_points = apply_plotly_fonts(fig_points)
+st.plotly_chart(fig_points, use_container_width=True)
+
+# ---------- Simple heatmap ----------
+st.subheader("Detection Heatmap")
+overlay_cell_m = st.slider(
+    "Heatmap cell size (meters)",
+    min_value=float(cell_m),
+    max_value=float(20 * cell_m),
+    value=float(2 * cell_m),
+    step=0.5,
+)
+heat_alpha = st.slider("Heatmap opacity", 0.0, 1.0, 0.45, 0.05)
+
+all_utm_x = [x for xs in utm_x_by_class for x in xs]
+all_utm_y = [y for ys in utm_y_by_class for y in ys]
+heat_grid, x0_m_any, y0_m_any, heat_cell_m = build_counts_any(
+    all_utm_x, all_utm_y, (left_m, bottom_m, right_m, top_m), overlay_cell_m
+)
+
+ny_h, nx_h = heat_grid.shape
+x_centers_m = x0_m_any + (heat_cell_m * (np.arange(nx_h) + 0.5))
+y_centers_m = y0_m_any + (heat_cell_m * (np.arange(ny_h) + 0.5))
+x_disp = (x_centers_m - left_m) / (right_m - left_m) * disp_w
+y_disp = (top_m - y_centers_m) / (top_m - bottom_m) * disp_h
+
+fig_heat = px.imshow(thumb_np)
+fig_heat.update_xaxes(range=[0, disp_w], showgrid=False, visible=False)
+fig_heat.update_yaxes(range=[disp_h, 0], showgrid=False, visible=False)
+fig_heat.update_layout(margin=dict(l=0, r=0, t=0, b=0), dragmode=False, height=700)
+zmax_val = float(np.nanmax(heat_grid)) if heat_grid.size else 1.0
+fig_heat.add_trace(
+    go.Heatmap(
+        z=heat_grid,
+        x=x_disp,
+        y=y_disp,
+        colorscale="Reds",
+        zmin=0,
+        zmax=zmax_val,
+        opacity=float(heat_alpha),
+        colorbar=dict(title="detections/cell"),
+        hovertemplate=f"{heat_cell_m:g}×{heat_cell_m:g} m cell<br>count: %{{z}}<extra></extra>",
+        name="Density",
+    )
+)
+fig_heat = apply_plotly_fonts(fig_heat)
+st.plotly_chart(fig_heat, use_container_width=True)
+
+st.stop()
 
 
 # Shapefile zips (no need to cache; small)

@@ -1,11 +1,10 @@
-# backend/Dockerfile  (patched)
+# backend/Dockerfile — API for weedgeolocator (YOLOv12 fork for YOLOv12-trained .pt files)
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1
 
-# OS deps for geo stack + OpenCV runtime libs (libGL, GLib, X libs)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential curl ca-certificates git \
     gdal-bin libgdal-dev libspatialindex-dev proj-bin proj-data \
@@ -15,52 +14,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY main.py /app/main.py
 
+# torch then YOLOv12 fork (same import as Colab strawberry training; do not use PyPI ultralytics alone for YOLOv12 weights)
 RUN pip install --upgrade pip && \
+    pip install "torch" "torchvision" && \
+    pip install "git+https://github.com/sunsmarterjie/yolov12.git" && \
     pip install \
       "fastapi==0.115.12" \
       "uvicorn[standard]==0.34.1" \
       "python-multipart==0.0.20" \
-      "ultralytics==8.3.81" \
       "numpy==2.1.1" \
       "pillow>=10.3,<11" \
       "rasterio==1.4.3" \
       "geopandas==1.1.1" \
       "pyogrio==0.11.1" \
       "shapely==2.1.1" \
-      "pyproj==3.7.1"
-
-EXPOSE 8000
-CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8000","--timeout-keep-alive","65"]
-# backend/Dockerfile  (patched)
-FROM python:3.12-slim
-
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
-
-# OS deps for geo stack + OpenCV runtime libs (libGL, GLib, X libs)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential curl ca-certificates git \
-    gdal-bin libgdal-dev libspatialindex-dev proj-bin proj-data \
-    libgl1 libglib2.0-0 libsm6 libxext6 libxrender1 \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-COPY main.py /app/main.py
-
-RUN pip install --upgrade pip && \
-    pip install \
-      "fastapi==0.115.12" \
-      "uvicorn[standard]==0.34.1" \
-      "python-multipart==0.0.20" \
-      "ultralytics==8.3.81" \
-      "numpy==2.1.1" \
-      "pillow>=10.3,<11" \
-      "rasterio==1.4.3" \
-      "geopandas==1.1.1" \
-      "pyogrio==0.11.1" \
-      "shapely==2.1.1" \
-      "pyproj==3.7.1"
+      "pyproj==3.7.1" \
+      "joblib>=1.3.0"
 
 EXPOSE 8000
 CMD ["uvicorn","main:app","--host","0.0.0.0","--port","8000","--timeout-keep-alive","65"]

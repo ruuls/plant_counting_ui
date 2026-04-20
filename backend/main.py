@@ -35,7 +35,10 @@ os.environ.setdefault("ULTRALYTICS_RUNS_DIR", "/tmp/runs")
 BACKEND_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = BACKEND_DIR.parent
 
-MODEL_PATH = PROJECT_ROOT / "models" / "bigmodel.pt"
+# Default weights; override for YOLOv12 checkpoints, e.g.
+# export MODEL_PATH=/Users/ragul/Downloads/best.pt
+_MODEL_PATH_ENV = os.getenv("MODEL_PATH", str(PROJECT_ROOT / "models" / "bigmodel.pt"))
+MODEL_PATH = Path(os.path.expanduser(_MODEL_PATH_ENV)).resolve()
 TILE_SIZE = int(os.getenv("TILE_SIZE", "640"))
 BATCH_TILES = int(os.getenv("BATCH_TILES", "8"))
 MAX_DISPLAY = int(os.getenv("MAX_DISPLAY", "2048"))
@@ -44,11 +47,10 @@ MAX_CELLS = int(os.getenv("MAX_CELLS", "60000000"))
 YOLO_CONF = float(os.getenv("YOLO_CONF", "0.25"))
 YOLO_IOU  = float(os.getenv("YOLO_IOU",  "0.45"))
 
-CLASS_NAMES = os.getenv("CLASS_NAMES", "ragweed,grass,palmer,soybean").split(",")
+# Startup fallback labels; real labels/classes are synced from the loaded checkpoint in load_model().
+CLASS_NAMES = os.getenv("CLASS_NAMES", "plant").split(",")
 CLASS_NAMES = [c.strip() for c in CLASS_NAMES if c.strip()]
-NUM_CLASSES = int(os.getenv("NUM_CLASSES", str(len(CLASS_NAMES) or 4)))
-if len(CLASS_NAMES) != NUM_CLASSES:
-    CLASS_NAMES = (CLASS_NAMES + [f"class_{i}" for i in range(len(CLASS_NAMES), NUM_CLASSES)])[:NUM_CLASSES]
+NUM_CLASSES = len(CLASS_NAMES) or 1
 
 MAX_OVERLAY_POINTS_PER_CLASS = int(os.getenv("MAX_OVERLAY_POINTS_PER_CLASS", "120000"))
 
@@ -136,10 +138,24 @@ def _stable_downsample_xy(x_list, y_list, max_keep=MAX_OVERLAY_POINTS_PER_CLASS)
 _MODEL = None
 _DEVICE = None
 
-def load_model(path: str = MODEL_PATH):
-    global _MODEL, _DEVICE
+def load_model(path: Path | str | None = None):
+    """Load YOLO weights and sync CLASS_NAMES / NUM_CLASSES from the checkpoint (YOLOv8 or YOLOv12 fork)."""
+    global _MODEL, _DEVICE, CLASS_NAMES, NUM_CLASSES
     if _MODEL is None:
-        _MODEL = YOLO(str(path))
+        p = Path(path) if path is not None else MODEL_PATH
+        p = p.expanduser().resolve()
+        if not p.is_file():
+            raise FileNotFoundError(f"Model weights not found: {p}")
+        _MODEL = YOLO(str(p))
+        # Match UI / inference loops to actual head output (e.g. single-class Strawberry).
+        nd = getattr(_MODEL, "names", None)
+        if isinstance(nd, dict):
+            CLASS_NAMES = [nd[i] for i in sorted(nd.keys())]
+        elif nd is not None:
+            CLASS_NAMES = list(nd)
+        if CLASS_NAMES:
+            NUM_CLASSES = len(CLASS_NAMES)
+
         _DEVICE = _get_device()
         try:
             _MODEL.to(_DEVICE)
@@ -519,6 +535,8 @@ def health():
 def infer(file: UploadFile = File(...)):
     src_path = save_upload_to_temp(file)
     try:
+        # Ensure classes come from the active checkpoint before cache key composition.
+        _ = load_model()
         file_sig = _file_fingerprint(src_path)
         class_names_tuple = tuple(CLASS_NAMES)
 
@@ -528,22 +546,15 @@ def infer(file: UploadFile = File(...)):
         )
         meta = res["meta"]
 
-        # ---------- 2) Filter out "soybean" class (case-insensitive) ----------
-        keep_idx = [i for i, n in enumerate(CLASS_NAMES) if n.strip().lower() != "soybean"]
-        if not keep_idx:
-            keep_idx = list(range(len(CLASS_NAMES)))
-
-        def _pick(lst_of_lists):
-            return [lst_of_lists[i] for i in keep_idx]
-
-        totals_by_class_kept = [res["totals_by_class"][i] for i in keep_idx]
-        pix_x_by_class_kept  = _pick(res["pix_x_by_class"])
-        pix_y_by_class_kept  = _pick(res["pix_y_by_class"])
-        utm_x_by_class_kept  = _pick(res["utm_x_by_class"])
-        utm_y_by_class_kept  = _pick(res["utm_y_by_class"])
-        lons_by_class_kept   = _pick(res["lons_by_class"])
-        lats_by_class_kept   = _pick(res["lats_by_class"])
-        class_names_kept     = [CLASS_NAMES[i] for i in keep_idx]
+        # ---------- 2) Keep exactly the checkpoint classes ----------
+        totals_by_class_kept = res["totals_by_class"]
+        pix_x_by_class_kept  = res["pix_x_by_class"]
+        pix_y_by_class_kept  = res["pix_y_by_class"]
+        utm_x_by_class_kept  = res["utm_x_by_class"]
+        utm_y_by_class_kept  = res["utm_y_by_class"]
+        lons_by_class_kept   = res["lons_by_class"]
+        lats_by_class_kept   = res["lats_by_class"]
+        class_names_kept     = CLASS_NAMES
 
         total_weeds_kept = int(sum(totals_by_class_kept))
 
