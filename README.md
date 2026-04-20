@@ -1,50 +1,61 @@
-# Weed Detection and Geolocation App
+# Plant counting UI
 
-1)A **Streamlit**-based web application for detecting and geolocating weeds in **georeferenced orthomosaic GeoTIFF images** (e.g., from drone surveys).  
-2)The app uses a **YOLOv8** model to process large images tile-by-tile, extract weed locations, and export a **Shapefile** with precise GPS coordinates.  
-3)This tool is designed for **precision agriculture**, enabling farmers and researchers to map weeds for **spot spraying** and **field analysis**.
+Web UI and API for **object detection on georeferenced orthomosaic GeoTIFFs** (for example UAV orthos). Upload a `.tif` / `.tiff`, run tiled inference, and review counts, density, and a simple map-style view. Detections can be exported for GIS (Shapefile pipeline in the API).
 
-Demo video can be found here: https://drive.google.com/file/d/1AvmWi4ZA1eJ7l6Ai5b9v9w3ow7zuIMDL/view?usp=sharing
+**Stack:** FastAPI backend + Streamlit frontend. Inference uses an **Ultralytics-compatible YOLO** checkpoint; class labels come from the model you load.
 
 ---
 
 ## Features
-- **Upload** `.tif` / `.tiff` georeferenced orthomosaic imagery.
-- **YOLOv8-based detection** on tiled images for large raster handling.
-- **Automatic GPS conversion** from UTM to WGS84.
-- **Export Shapefile** of detections for use in GIS software.
-- **Interactive visualization** overlaying detections on the orthomosaic and important KPIs like weed density etc.
-- Currently supports **grass weeds** only (common ragweed, Palmer amaranth, and common lambsquarters coming soon).
+
+- Upload georeferenced **GeoTIFF** orthomosaics.
+- **Tiled inference** so large rasters are handled without loading the full image at once.
+- **CRS handling**: outputs use coordinates appropriate for mapping (backend converts as needed).
+- **Per-class counts**, field area / density style metrics, and a **detection heatmap** in the UI.
+- Point the API at your own weights via **`MODEL_PATH`** (see below).
 
 ---
-## Run without docker
-Clone the repo and install dependencies from `requirements.txt`:
+
+## Run locally (no Docker)
+
+Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
-Then run frontend
+
+**Backend** (terminal 1), optional custom model:
+
+```bash
+export MODEL_PATH="/path/to/your/best.pt"
+export KMP_DUPLICATE_LIB_OK=TRUE   # macOS: avoids some OpenMP conflicts
+cd backend
+uvicorn main:app --host 127.0.0.1 --port 8000
+```
+
+There is also `run_api_strawberry.sh` in the repo root as a convenience wrapper that sets `MODEL_PATH` and starts `uvicorn`.
+
+**Frontend** (terminal 2):
 
 ```bash
 cd frontend
-streamlit run app.py --server.port=8080 --server.address=0.0.0.0 --server.maxUploadSize=10240
+streamlit run app.py --server.port=8501 --server.address=127.0.0.1 --server.maxUploadSize=10240
 ```
 
-Then run backend
+Ensure the frontend can reach the API (defaults expect `http://127.0.0.1:8000` unless you configure `API_BASE`).
+
+---
+
+## Run with Docker Compose
+
+From the repository root:
 
 ```bash
-cd backend
-uvicorn main:app --host 0.0.0.0 --port 8000
+docker compose build
+docker compose up
 ```
 
-### Running with Docker
-Build an image
-```bash
-docker compose build --no-cache weed-geo 
-```
+- API: port **8000**
+- Streamlit UI: port **8501**
 
-Run 
-```bash
-docker compose up weed-geo
-```
-
+Mount or bake your model under the paths expected in `docker-compose.yml`, or adjust `MODEL_PATH` and volume mappings there.
